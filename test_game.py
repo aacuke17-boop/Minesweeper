@@ -1,3 +1,6 @@
+import random
+
+import solver
 from game import Board
 
 
@@ -111,3 +114,70 @@ def test_chord_with_a_wrong_flag_loses():
 def test_chord_on_hidden_cell_does_nothing():
     board = make_board(3, 3, [(0, 0)])
     assert board.chord(1, 1) == []
+
+
+# ---- fair (guess-free) board generation
+
+
+def solve_board(board, r, c):
+    """Return how many safe cells logic alone could NOT open on this board."""
+    mines = [int(cell.is_mine) for row in board.grid for cell in row]
+    left, _ = solver.solve(board.rows, board.cols, mines, r * board.cols + c)
+    return left
+
+
+def test_solver_never_makes_a_wrong_deduction():
+    rng = random.Random(3)
+    for rows, cols, mines in [(9, 9, 10), (16, 16, 40), (16, 30, 99), (5, 5, 16)]:
+        for _ in range(100):
+            start = rng.randrange(rows * cols)
+            forbidden = solver.forbidden_zone(rows, cols, start)
+            layout = solver.make_layout(rows, cols, mines, forbidden, rng)
+            _, state = solver.solve(rows, cols, layout, start)
+            for i, s in enumerate(state):
+                assert not (s == 1 and layout[i]), "opened a mine"
+                assert not (s == 2 and not layout[i]), "flagged a safe cell"
+
+
+def test_generated_boards_can_be_solved_without_guessing():
+    for rows, cols, mines in [(9, 9, 10), (16, 16, 40)]:
+        for _ in range(25):
+            board = Board(rows, cols, mines)  # fair=True is the default
+            r, c = random.randrange(rows), random.randrange(cols)
+            board.reveal(r, c)
+            assert board.solvable
+            assert solve_board(board, r, c) == 0
+
+
+def test_hard_boards_are_nearly_always_guess_free():
+    good = 0
+    for _ in range(8):
+        board = Board(16, 30, 99)
+        board.reveal(8, 15)
+        good += board.solvable
+    assert good >= 7
+
+
+def test_fair_boards_keep_the_basic_rules():
+    for _ in range(50):
+        board = Board(16, 16, 40)
+        board.reveal(0, 0)  # a corner click
+        assert sum(cell.is_mine for row in board.grid for cell in row) == 40
+        for r, c in [(0, 0), *board.neighbors(0, 0)]:
+            assert not board.grid[r][c].is_mine
+
+
+def test_plain_random_boards_still_work():
+    board = Board(9, 9, 10, fair=False)
+    board.reveal(4, 4)
+    assert board.solvable is None
+    assert sum(cell.is_mine for row in board.grid for cell in row) == 10
+    for r, c in [(4, 4), *board.neighbors(4, 4)]:
+        assert not board.grid[r][c].is_mine
+
+
+def test_impossibly_dense_boards_fall_back_and_still_play():
+    board = Board(5, 5, 16)  # 16 mines + the 9 safe cells fill the whole board
+    board.reveal(2, 2)
+    assert board.mines_placed
+    assert sum(cell.is_mine for row in board.grid for cell in row) == 16

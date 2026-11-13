@@ -31,9 +31,10 @@ POP_LIMIT = 40  # bigger reveals skip the pop, which means far fewer updates
 RIPPLE_STEPS = 8  # a reveal ripple is drawn in this many steps
 HOVER_INTERVAL = 16  # ms: how often the board reports the cursor position
 
-# tiles highlighted by easy mode / chord
-HIGHLIGHT_FILL = ft.Colors.with_opacity(0.5, ft.Colors.PRIMARY)
-HIGHLIGHT_BORDER = ft.Border.all(2, ft.Colors.PRIMARY)
+# the tile under the cursor gets a light white veil
+HOVER_TINT = ft.BoxDecoration(
+    bgcolor=ft.Colors.with_opacity(0.2, ft.Colors.WHITE), border_radius=6
+)
 
 # animation speeds in milliseconds (make smaller = faster)
 EASE = ft.Animation(50, ft.AnimationCurve.EASE_OUT)  # buttons, pills, swatches
@@ -168,6 +169,7 @@ class MinesweeperApp:
         self.accent = ACCENTS[0][1]
         self.animations = True
         self.easy_mode = False
+        self.fair_boards = True  # mines are laid out so no guessing is needed
         self.binds = dict(DEFAULT_BINDS)
         self.key_map: dict[str, str] = {}  # key -> action (see refresh_key_map)
         self.rebinding: str | None = None
@@ -285,6 +287,8 @@ class MinesweeperApp:
             self.animations = saved["animations"]
         if isinstance(saved.get("easy_mode"), bool):
             self.easy_mode = saved["easy_mode"]
+        if isinstance(saved.get("fair_boards"), bool):
+            self.fair_boards = saved["fair_boards"]
         accent = saved.get("accent")
         if isinstance(accent, str) and HEX_RE.fullmatch(accent):
             self.accent = accent.upper()
@@ -326,6 +330,7 @@ class MinesweeperApp:
                     "dark": self.dark,
                     "animations": self.animations,
                     "easy_mode": self.easy_mode,
+                    "fair_boards": self.fair_boards,
                     "accent": self.accent,
                     "binds": self.binds,
                     "difficulty": self.difficulty,
@@ -508,6 +513,15 @@ class MinesweeperApp:
         self.anim_switch = ft.Switch(
             label="Animations", value=self.animations, on_change=self.on_anim_change
         )
+        self.fair_switch = ft.Switch(
+            label="Fair boards",
+            tooltip=(
+                "New boards are laid out so that logic alone can solve them, "
+                "without guessing (when the mine density allows it)"
+            ),
+            value=self.fair_boards,
+            on_change=self.on_fair_change,
+        )
         self.easy_switch = ft.Switch(
             label="Easy mode",
             tooltip="Highlights the tiles around the one under the cursor",
@@ -540,6 +554,7 @@ class MinesweeperApp:
                 ft.Row([ft.Icon(icon=ft.Icons.DARK_MODE), self.dark_switch]),
                 ft.Row([ft.Icon(icon=ft.Icons.ANIMATION), self.anim_switch]),
                 ft.Row([ft.Icon(icon=ft.Icons.GRID_ON), self.easy_switch]),
+                ft.Row([ft.Icon(icon=ft.Icons.LIGHTBULB), self.fair_switch]),
                 ft.Row(
                     [
                         ft.Icon(icon=ft.Icons.PALETTE),
@@ -884,6 +899,9 @@ class MinesweeperApp:
         else:
             self.hidden_color = light_tile_color(self.accent)
             self.number_colors = LIGHT_NUMBER_COLORS
+        # chord / easy-mode highlight: the real accent colour
+        self.highlight_fill = ft.Colors.with_opacity(0.6, self.accent)
+        self.highlight_border = ft.Border.all(2, self.accent)
         self.restyle_all()
 
         self.page.theme = ft.Theme(color_scheme_seed=self.accent)
@@ -923,6 +941,12 @@ class MinesweeperApp:
         self.board_card.scale = 1
         self.face.update()
         self.board_card.update()
+
+    def on_fair_change(self, e):
+        self.fair_boards = e.control.value
+        self.save_state()
+        if not self.board.mines_placed:
+            self.board.fair = self.fair_boards  # this board has no mines yet
 
     def on_easy_change(self, e):
         self.easy_mode = e.control.value
@@ -1160,7 +1184,7 @@ class MinesweeperApp:
             and len(self.cell_boxes) == rows
             and len(self.cell_boxes[0]) == cols
         )
-        self.board = Board(rows, cols, mines)
+        self.board = Board(rows, cols, mines, fair=self.fair_boards)
         self.highlight = set()
         self.chord_held = False
         self.chord_origin = None
@@ -1208,8 +1232,11 @@ class MinesweeperApp:
             for box in row:
                 box.bgcolor = self.hidden_color
                 box.border = None
+                box.foreground_decoration = None
                 box.scale = 1
                 box.content.value = ""
+        if self.hover is not None:  # the cursor is still resting on a tile
+            self.style_cell(*self.hover)
 
     def build_grid(self):
         size = self.cell_size
@@ -1259,7 +1286,7 @@ class MinesweeperApp:
 
     # ---------- the board: ONE detector for all tiles ----------
     # The whole grid sits inside a single GestureDetector. It reports where the
-    # pointer is and we work out which tile that is. This is far lighter than a
+    # pointer is, and we work out which tile that is. This is far lighter than a
     # detector per tile, and every tile owns a full square (the tile plus half
     # of the gap on each side), so there are no dead spots between tiles.
 
@@ -1288,35 +1315,36 @@ class MinesweeperApp:
         if tile == self.hover:
             return
         old, self.hover = self.hover, tile
-        if self.animations:
-            self.move_hover_scale(old, tile)
+        self.move_hover(old, tile)
         if self.chord_held and self.chord_origin is not None and tile != self.chord_origin:
-            self.chord_moved = True  # no reveal on release any more
+            self.chord_moved = True  # no reveal on release anymore
         if self.easy_mode or self.chord_held:
             self.refresh_highlight()
 
     def on_exit(self, e):
         old, self.hover = self.hover, None
-        if old is not None and self.animations:
-            self.move_hover_scale(old, None)
+        self.move_hover(old, None)
         if self.chord_held and self.chord_origin is not None:
             self.chord_moved = True  # the cursor left the board
         if self.easy_mode or self.chord_held:
             self.refresh_highlight()
 
-    def move_hover_scale(self, old, new):
-        boxes = self.cell_boxes
-        if old is not None:
-            box = boxes[old[0]][old[1]]
-            if box.scale != 1:
-                box.scale = 1
-                box.update()
-        if new is not None:
-            r, c = new
-            if not self.board.game_over and not self.board.grid[r][c].is_revealed:
-                box = boxes[r][c]
-                box.scale = HOVER_SCALE
-                box.update()
+    def move_hover(self, old, new):
+        """Hover feedback: a light veil on the tile under the cursor (plus a
+        small grow when animations are on). style_cell() sets or clears the veil."""
+        board = self.board
+        for tile in {old, new} - {None}:
+            r, c = tile
+            self.style_cell(r, c)
+            box = self.cell_boxes[r][c]
+            if self.animations:
+                active = (
+                    tile == self.hover
+                    and not board.game_over
+                    and not board.grid[r][c].is_revealed
+                )
+                box.scale = HOVER_SCALE if active else 1
+            box.update()
 
     def toggle_flag(self, r: int, c: int):
         board = self.board
@@ -1366,9 +1394,12 @@ class MinesweeperApp:
                         cell = board.grid[rr][cc]
                         if not cell.is_revealed and cell.is_mine != cell.is_flagged:
                             cells.append((rr, cc))
-            # the game is over: remove any highlight that is still showing
+            # the game is over: remove any highlight and hover veil still showing
             old, self.highlight = self.highlight, set()
-            for rr, cc in old.difference(cells):
+            leftover = old.difference(cells)
+            if self.hover is not None:
+                leftover.add(self.hover)
+            for rr, cc in leftover:
                 self.style_cell(rr, cc)
                 self.cell_boxes[rr][cc].update()
 
@@ -1481,7 +1512,7 @@ class MinesweeperApp:
                 self.new_best = self.rank == 0
                 if self.rank is not None:
                     self.save_state()
-            else:  # custom boards only keep a best time for this session
+            else:  # custom boards only keep the best time for this session
                 best = self.best.get(key)
                 self.new_best = best is None or self.elapsed < best
                 if self.new_best:
@@ -1552,11 +1583,15 @@ class MinesweeperApp:
             label.value = ""
 
         if (r, c) in self.highlight and not cell.is_revealed:
-            box.border = HIGHLIGHT_BORDER
+            box.border = self.highlight_border
             if not cell.is_flagged:
-                box.bgcolor = HIGHLIGHT_FILL
+                box.bgcolor = self.highlight_fill
         else:
             box.border = None
+
+        # the tile under the cursor gets a light veil
+        hovered = (r, c) == self.hover and not cell.is_revealed and not board.game_over
+        box.foreground_decoration = HOVER_TINT if hovered else None
 
     def restyle_all(self):
         """Repaint every tile (used when the theme or accent changes)."""
@@ -1596,6 +1631,8 @@ class MinesweeperApp:
             hint = f"💥 Boom! Press {self.key('restart')} to try again"
         else:
             hint = self.default_hint()
+            if board.fair and board.solvable is False:
+                hint = "Too many mines for a guess-free board: a guess may be needed"
         self.set_text(self.hint_text, hint)
 
     def update_pills(self):

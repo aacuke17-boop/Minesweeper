@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import random
 
+import solver
+
 
 @dataclass
 class Cell:
@@ -11,10 +13,11 @@ class Cell:
 
 
 class Board:
-    def __init__(self, rows: int = 9, cols: int = 9, mines: int = 10):
+    def __init__(self, rows: int = 9, cols: int = 9, mines: int = 10, fair: bool = True):
         self.rows = rows
         self.cols = cols
         self.mines = mines
+        self.fair = fair  # lay mines out so that logic can finish the board
         self.reset()
 
     def reset(self):
@@ -25,6 +28,8 @@ class Board:
         self.flags_used = 0
         self.revealed_count = 0
         self.safe_cells = self.rows * self.cols - self.mines
+        self.solvable: bool | None = None  # set when the mines are placed
+        self.tries = 0  # layouts that were tried to find a fair one
 
     def neighbors(self, r: int, c: int):
         for dr in (-1, 0, 1):
@@ -36,16 +41,30 @@ class Board:
                     yield nr, nc
 
     def place_mines(self, safe_r: int, safe_c: int):
-        # The clicked cell and its neighbors can't hold mines
-        forbidden = {(safe_r, safe_c), *self.neighbors(safe_r, safe_c)}
-        positions = [
-            (r, c)
-            for r in range(self.rows)
-            for c in range(self.cols)
-            if (r, c) not in forbidden
-        ]
-        for r, c in random.sample(positions, self.mines):
-            self.grid[r][c].is_mine = True
+        """Place the mines. The clicked cell and its neighbors stay mine-free.
+
+        With fair=True the layout is chosen so that logic alone can open every
+        safe cell (no guessing). Very dense boards may not allow that: then the
+        layout that needs the fewest guesses is used and `solvable` is False.
+        """
+        if self.fair:
+            layout, unresolved, self.tries = solver.generate(
+                self.rows, self.cols, self.mines, safe_r * self.cols + safe_c
+            )
+            self.solvable = unresolved == 0
+            for i, has_mine in enumerate(layout):
+                if has_mine:
+                    self.grid[i // self.cols][i % self.cols].is_mine = True
+        else:
+            forbidden = {(safe_r, safe_c), *self.neighbors(safe_r, safe_c)}
+            positions = [
+                (r, c)
+                for r in range(self.rows)
+                for c in range(self.cols)
+                if (r, c) not in forbidden
+            ]
+            for r, c in random.sample(positions, self.mines):
+                self.grid[r][c].is_mine = True
 
         self._count_neighbors()
         self.mines_placed = True
